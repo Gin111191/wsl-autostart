@@ -1,9 +1,10 @@
 # wsl-autostart
 
-Make WSL2 start automatically when you log into Windows — **and actually stay
-running**, so you can SSH straight into it without touching the Windows desktop.
+Make WSL2 start automatically on Windows — **and actually stay running** — so you can
+SSH straight into it without touching the Windows desktop.
 
-One file. One command. No admin rights.
+One file, one command, no admin rights if you log in.
+[One more step](#if-nobody-logs-into-windows) if you want it up before anyone does.
 
 ---
 
@@ -105,15 +106,67 @@ ssh your-wsl-host
 
 ---
 
-## Requirement: you must log into Windows
+## If nobody logs into Windows
 
-The Startup folder only fires on an **interactive login**. Boot the machine and
-leave it at the lock screen and nothing starts.
+The Startup folder only fires on an **interactive login**. Boot the machine, leave it
+at the lock screen, and nothing above has run. `schtasks /query` says as much about the
+task variant too — `Logon Mode: Interactive only`.
 
-If you need WSL up on a headless box that nobody logs into, enable Windows
-auto-login. Do **not** reach for a `-AtStartup` scheduled task running as
-`SYSTEM`: WSL creates a separate VM per Windows user, so you end up with two
-distro instances in parallel, each entitled to whatever `.wslconfig` allocates.
+So for a box you want to reach by SSH right after power-on, without walking over to it,
+the autostart has to be triggered by the boot rather than by the login.
+
+### Do not use SYSTEM
+
+The obvious move is a `-AtStartup` task running as `SYSTEM`. Don't.
+
+WSL keys a distro instance to the **Windows user SID**, so a `SYSTEM` instance and your
+own instance are two separate utility VMs against the same `ext4.vhdx`, each entitled to
+whatever `.wslconfig` hands out. You get the memory twice and the disk contended.
+
+### Run it at startup as yourself instead
+
+Same trigger, same SID as your interactive session, so it is the *one* instance — the one
+you also attach to when you do eventually log in. Windows stores the credential the way it
+stores any saved task credential; nothing lands in the registry in clear text, which is the
+part auto-login gets wrong.
+
+**Administrator** PowerShell, once:
+
+```powershell
+$c = Get-Credential          # your own account, e.g. GIN-PC\ADMIN — see `whoami`
+$t = New-ScheduledTaskTrigger -AtStartup
+$t.Delay = 'PT30S'           # let wslservice finish coming up
+
+Register-ScheduledTask -TaskName "wsl-boot" -Force `
+  -User $c.UserName -Password $c.GetNetworkCredential().Password `
+  -Action   (New-ScheduledTaskAction -Execute "C:\Windows\System32\wsl.exe" -Argument "-d Ubuntu -u root -e sleep infinity") `
+  -Trigger  $t `
+  -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan))
+```
+
+`-ExecutionTimeLimit (New-TimeSpan)` is the 72-hour cap again. Still don't omit it.
+
+`Get-Credential` prompts in the console: type the username, Enter, then the password
+(nothing echoes). `Ctrl+C` cancels — if you cancel, `$c` is empty and
+`Register-ScheduledTask` fails, so rerun the whole block.
+
+**Accept it before you trust it.** Reboot, do **not** log in, wait a minute, and SSH in
+from another machine. Only once that works, remove the login-triggered copies:
+
+```powershell
+Unregister-ScheduledTask -TaskName "Start WSL" -Confirm:$false
+Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\start-wsl.vbs"
+```
+
+Keep them until then — they are what works today.
+
+### If your account has no password
+
+An account that only ever unlocks with a PIN or Windows Hello has no password for the task
+to store, and registration fails. That is the case where auto-login is the remaining option:
+enable it, then put `rundll32 user32.dll,LockWorkStation` in the Startup folder next to
+`start-wsl.vbs` so the desktop does not sit unlocked. The password lives in the registry
+either way, so treat it as the weaker choice, not the default.
 
 ---
 
@@ -122,7 +175,7 @@ distro instances in parallel, each entitled to whatever `.wslconfig` allocates.
 | Symptom | Cause |
 |---|---|
 | Distro dies ~20s after starting | The command still exits. Check the `.vbs` really says `-e sleep infinity`. |
-| Nothing starts at all | Machine booted but nobody logged in. Startup only fires on login. |
+| Nothing starts at all | Machine booted but nobody logged in. Startup only fires on login — see [If nobody logs into Windows](#if-nobody-logs-into-windows). |
 | Black window flashes at login | You used a `.bat`. Switch to `.vbs` with the `0` argument. |
 | Wrong distro starts | `wsl -l -v`, then fix `-d <name>` in the `.vbs`. |
 | Distro dies after ~3 days | You used the scheduled-task variant without `-ExecutionTimeLimit 0` (see below). |
@@ -162,3 +215,12 @@ Unregister-ScheduledTask -TaskName "Start WSL" -Confirm:$false
 
 WSL 2.7.12, Windows 11 build 26200, Ubuntu with `systemd=true` in `/etc/wsl.conf`.
 The behaviour it works around has been in WSL2 for years and is not version-specific.
+
+What is measured here is the Startup-folder install: the 19-second death, the
+`sleep infinity` fix, and `Logon Mode: Interactive only` on the task variant.
+
+The **at-startup-as-yourself** section is reasoned from how WSL keys instances to the
+user SID, not yet confirmed by a no-login reboot on this machine. Run the acceptance
+test in that section before you delete the `.vbs`. If it turns out session 0 cannot
+hold a distro open, that section is wrong and auto-login is the answer — please open
+an issue rather than assume it works.
