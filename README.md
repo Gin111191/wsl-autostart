@@ -130,25 +130,82 @@ you also attach to when you do eventually log in. Windows stores the credential 
 stores any saved task credential; nothing lands in the registry in clear text, which is the
 part auto-login gets wrong.
 
-**Administrator** PowerShell, once:
+**Administrator** PowerShell, once. Paste these **one line at a time** — a legacy conhost
+window drops characters out of multi-line pastes, and backtick continuations are the first
+thing it mangles, so there are none here:
 
 ```powershell
-$c = Get-Credential          # your own account, e.g. GIN-PC\ADMIN — see `whoami`
+$c = Get-Credential -UserName (whoami) -Message "wsl-boot"
+```
+```powershell
 $t = New-ScheduledTaskTrigger -AtStartup
-$t.Delay = 'PT30S'           # let wslservice finish coming up
-
-Register-ScheduledTask -TaskName "wsl-boot" -Force `
-  -User $c.UserName -Password $c.GetNetworkCredential().Password `
-  -Action   (New-ScheduledTaskAction -Execute "C:\Windows\System32\wsl.exe" -Argument "-d Ubuntu -u root -e sleep infinity") `
-  -Trigger  $t `
-  -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan))
+```
+```powershell
+$t.Delay = 'PT30S'
+```
+```powershell
+$a = New-ScheduledTaskAction -Execute "C:\Windows\System32\wsl.exe" -Argument "-d Ubuntu -u root -e sleep infinity"
+```
+```powershell
+$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan)
 ```
 
-`-ExecutionTimeLimit (New-TimeSpan)` is the 72-hour cap again. Still don't omit it.
+Check all four before registering — this catches both failures below at once:
 
-`Get-Credential` prompts in the console: type the username, Enter, then the password
-(nothing echoes). `Ctrl+C` cancels — if you cancel, `$c` is empty and
-`Register-ScheduledTask` fails, so rerun the whole block.
+```powershell
+$c.UserName; $t.CimClass.CimClassName; $a.Execute; $s.ExecutionTimeLimit
+```
+
+Four lines back, or something is null:
+
+```
+gin-pc\admin
+MSFT_TaskBootTrigger
+C:\Windows\System32\wsl.exe
+PT0S
+```
+
+`MSFT_TaskTimeTrigger` instead of `MSFT_TaskBootTrigger` means `-AtStartup` was lost and
+the task would fire once at a clock time. Then:
+
+```powershell
+Register-ScheduledTask -TaskName "wsl-boot" -Force -User $c.UserName -Password $c.GetNetworkCredential().Password -Action $a -Trigger $t -Settings $s
+```
+
+And confirm what was actually saved, which is not always what you asked for:
+
+```powershell
+$x = Get-ScheduledTask -TaskName "wsl-boot"; $x.Triggers.CimClass.CimClassName; $x.Settings.ExecutionTimeLimit; $x.Principal.LogonType
+```
+
+```
+MSFT_TaskBootTrigger
+PT0S
+Password
+```
+
+`LogonType: Password` is the one that matters — it means the task runs with nobody logged
+in. `Interactive` means the credential did not stick and you have rebuilt the thing you
+were trying to replace.
+
+### The two ways this fails
+
+**`You cannot call a method on a null-valued expression`** on the register line: `$c` is
+null because `Get-Credential` was cancelled. `Ctrl+C` or an empty Enter at its prompt both
+leave it null and it says nothing about it. Re-run that line and check `$c.UserName` before
+moving on.
+
+**`The user name or password is incorrect`**: it wants the account password — what you
+would type at the lock screen — not your PIN. A PIN is device-local and a task cannot store
+it. If you sign in with a Microsoft account, it is that account's password.
+
+```powershell
+Get-LocalUser | Select-Object Name, Enabled, PasswordRequired, PrincipalSource
+```
+
+`PrincipalSource: MicrosoftAccount` may need `-User "MicrosoftAccount\you@example.com"`
+instead of the `whoami` form. `PasswordRequired: False` with PIN-only sign-in means there
+is no password to store at all — see below.
 
 **Accept it before you trust it.** Reboot, do **not** log in, wait a minute, and SSH in
 from another machine. Only once that works, remove the login-triggered copies:
@@ -216,11 +273,13 @@ Unregister-ScheduledTask -TaskName "Start WSL" -Confirm:$false
 WSL 2.7.12, Windows 11 build 26200, Ubuntu with `systemd=true` in `/etc/wsl.conf`.
 The behaviour it works around has been in WSL2 for years and is not version-specific.
 
-What is measured here is the Startup-folder install: the 19-second death, the
-`sleep infinity` fix, and `Logon Mode: Interactive only` on the task variant.
+Measured: the 19-second death, the `sleep infinity` fix, `Logon Mode: Interactive only`
+on the logon-task variant, and the `wsl-boot` task registering with
+`MSFT_TaskBootTrigger` / `PT0S` / `LogonType: Password` on a real machine. Both failure
+modes in *The two ways this fails* are transcripts, not guesses.
 
-The **at-startup-as-yourself** section is reasoned from how WSL keys instances to the
-user SID, not yet confirmed by a no-login reboot on this machine. Run the acceptance
-test in that section before you delete the `.vbs`. If it turns out session 0 cannot
-hold a distro open, that section is wrong and auto-login is the answer — please open
-an issue rather than assume it works.
+Still unmeasured: whether a distro started from **session 0** stays up and answers SSH
+with nobody logged in. That is the one claim here reasoned from how WSL keys instances to
+the user SID rather than observed. Run the acceptance test above before deleting the
+`.vbs`, and if session 0 turns out not to hold a distro open, open an issue — auto-login
+is then the only answer and this section is wrong.
