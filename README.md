@@ -225,6 +225,43 @@ enable it, then put `rundll32 user32.dll,LockWorkStation` in the Startup folder 
 `start-wsl.vbs` so the desktop does not sit unlocked. The password lives in the registry
 either way, so treat it as the weaker choice, not the default.
 
+### The cost: it takes WSLg down with it
+
+A boot-triggered instance is created before anyone has a desktop, and WSL binds a distro
+instance to the session that created it. WSLg's Windows half, `msrdc.exe`, therefore
+lands in **session 0**, where there is no desktop to draw on. It connects to the weston
+RDP server inside the WSLg system distro, then drops the peer ~100 s later; weston's
+`rdp-backend.so` NULL-derefs on the disconnect path and dies with SIGSEGV, WSLGd
+restarts it, and the loop runs all day — about 850 crashes per 24 h on the box this was
+written on:
+
+```
+$ grep -c "terminated with signal 11" /mnt/wslg/stderr.log
+$ dmesg | grep weston
+weston[3773]: segfault at 218 ... in rdp-backend.so[1d17b,...]
+$ tasklist.exe | findstr msrdc      # Session 0, while your desktop is session 1
+$ query.exe session                 # console  ADMIN  1  Active
+```
+
+Logging in later does not rescue it: the instance already exists, and every terminal you
+open afterwards attaches to that same one. No Linux GUI app works for as long as the
+machine is up.
+
+So pick one, they do not combine:
+
+| You want | Use |
+|---|---|
+| SSH before anyone logs in | the boot task above — and no GUI apps, ever |
+| Linux GUI apps (WSLg) | the Startup-folder `.vbs` only, so the first instance is yours |
+
+If you take the boot task and never wanted GUI apps anyway, turn WSLg off outright and
+save the crash loop and its log churn — `%USERPROFILE%\.wslconfig`:
+
+```ini
+[wsl2]
+guiApplications=false
+```
+
 ---
 
 ## Troubleshooting
